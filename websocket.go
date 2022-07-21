@@ -1,17 +1,20 @@
 package websocket
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // WebSocket WebSocket 接続
 type WebSocket struct {
-	c          net.Conn
-	subscribes []chan<- Packet
-	m          *sync.Mutex
+	c           net.Conn
+	subscribes  []chan<- Packet
+	pongCatcher chan<- Packet
+	m           *sync.Mutex
 }
 
 // WebSocket packet 定数
@@ -95,6 +98,36 @@ func (ws *WebSocket) SendPing(data []byte) error {
 	})
 }
 
+// CheckAlive ping を送信し、pong を受け取るまで待機する。
+// t でタイムアウトする時間を設定できる
+func (ws *WebSocket) CheckAlive(t time.Duration) (bool, error) {
+	ws.m.Lock()
+	if ws.pongCatcher != nil {
+		ws.m.Unlock()
+		return false, errors.New("CheckAlive() already running")
+	}
+	ch := make(chan Packet)
+	ws.pongCatcher = ch
+	ws.m.Unlock()
+	defer func() {
+		ws.m.Lock()
+		ws.pongCatcher = nil
+		close(ch)
+		ws.m.Unlock()
+	}()
+	if e := ws.SendPing(nil); e != nil {
+		return false, e
+	}
+	ctx, cancel := context.WithTimeout(context.TODO(), t)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return false, nil
+	case <-ch:
+		return true, nil
+	}
+}
+
 // Shutdown close パケットを送信し、Websocket を閉じる
 func (ws *WebSocket) Shutdown() error {
 	ws.sendPacket(&Packet{
@@ -132,7 +165,13 @@ func (ws *WebSocket) listenPacket() {
 							Data:   packet.Data,
 						})
 					case OpcodePong:
-						// ignore
+						ws.m.Lock()
+						if ws.pongCatcher != nil {
+							ws.m.Unlock()
+							ws.pongCatcher <- *packet
+						} else {
+							ws.m.Unlock()
+						}
 					case OpcodeClose:
 						ws.Close()
 						return

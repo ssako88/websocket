@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type handler struct {
@@ -188,6 +189,58 @@ func TestWebSocket(t *testing.T) {
 		t.Error("received incorrect ping: expect:", expectedPing, "got:", buf[:n])
 	}
 
+	// check alive
+	expectedPing = []byte{
+		OpcodePing, 0,
+	}
+	ch := make(chan int)
+	go func() {
+		defer func() {
+			ch <- 0
+		}()
+		result, err := h.ws.CheckAlive(time.Second)
+		if err != nil {
+			t.Error("CheckAlive() failed:", err)
+			h.ws.Close()
+			return
+		}
+		if !result {
+			t.Error("CheckAlive() expected to succeed")
+		}
+	}()
+	n, err = conn.Read(data)
+	if err != nil {
+		t.Error("failed to receive ping:", err)
+	} else if !bytes.Equal(data[:n], expectedPing) {
+		t.Error("received incorrect ping: expect:", expectedPing, "got:", buf[:n])
+	}
+	if _, err := conn.Write([]byte{OpcodePong, 0}); err != nil {
+		t.Error("failed to send packet:", err)
+	}
+	<-ch
+
+	// check alive (timeout)
+	go func() {
+		defer func() {
+			ch <- 0
+		}()
+		result, err := h.ws.CheckAlive(time.Millisecond)
+		if err != nil {
+			t.Error("CheckAlive() failed:", err)
+			h.ws.Close()
+			return
+		}
+		if result {
+			t.Error("CheckAlive() expected to succeed")
+		}
+	}()
+	_, err = conn.Read(data)
+	if err != nil {
+		t.Error("failed to receive ping:", err)
+	}
+	<-ch
+
+	// close
 	data = []byte{
 		OpcodeClose, 0,
 	}
